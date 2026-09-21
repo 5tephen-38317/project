@@ -1,32 +1,102 @@
-전국 고령화 지도를 보여 주는 스트림릿 앱 하나(main.py)를 만들어 줘. 스트림릿 클라우드에 올릴 거야.
-시군구별 65세 이상 인구 비율을 색으로 칠한 단계구분도야.
+import re
+import requests
+import pandas as pd
+import streamlit as st
+import plotly.express as px
 
-■ 인구 데이터
-- 주소: https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz
-- 2015~2026년 전국 읍·면·동 인구야. 가장 최신 연도로 그려 줘.
-- 열은 연도 · 시도 · 시군구 · 동 · 코드, 그리고 나이별 인구 열이야.
-- 나이별 열 이름은 '계_0세' · '남_0세' · '여_0세' 형식으로 나이마다 셋씩 있고 '계_100세 이상'까지 이어져.
-  '계_'가 남녀를 합친 값이야.
-- '코드'는 행정동 코드 열 자리야. 계산할 숫자가 아니라 이름표니까 반드시 글자로 읽어.
-  앞 5자리를 잘라 시군구를 찾는 데 써야 하거든.
-- 인구는 읍·면·동 단위야. '코드' 앞 5자리가 시군구를 가리켜.
+st.set_page_config(page_title="전국 고령화 지도", layout="wide")
+st.title("🗺️ 전국 고령화 지도")
+st.caption("시군구별 65세 이상 인구 비율 (행정안전부 주민등록 인구)")
 
-■ 지도 경계 데이터
-- 주소: https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson
-- 전국 시군구 255개의 경계가 들어 있는 GeoJSON이야.
-- 지역마다 속성이 세 개야: '코드'(5자리) · '시군구' · '시도'.
+POP_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/population_yearly.csv.gz"
+GEO_URL = "https://raw.githubusercontent.com/greatsong/modudata/main/data/boundaries/sigungu_kr.geojson"
 
-■ 지도
-- 지역은 이름이 아니라 '코드'로 맞춰 줘. 이름으로 맞추면 '남구'처럼 여러 시도에 같은 이름이 있어서 어긋나.
-- 배경 지도 타일 없이 경계선만 보이게.
-- 색은 이어지는 그라데이션 말고 5단계로 끊어 줘. 구간 경계값은 19% · 23% · 28% · 38%.
-  전국 시군구를 다섯 덩어리로 나눈 실제 값이야. 낮은 쪽은 옅게, 높은 쪽은 진하게.
-- 범례에 각 단계의 비율 구간이 글자로 보이게. 예: '19% 미만', '38% 이상'.
-- 마우스를 올리면 시군구 이름 · 시도 · 고령화율(%)이 보이게.
-- 지도 아래에 고령화율 높은 곳 10개와 낮은 곳 10개를 표 두 개로 나란히 보여 줘.
+@st.cache_data(show_spinner="인구 데이터를 불러오는 중입니다...")
+def load_population():
+    # '코드' 열은 앞자리 0이 사라지지 않게 글자로 읽습니다
+    return pd.read_csv(POP_URL, dtype={"코드": str})
 
-■ 규칙
-- 한국어 라벨, 초보자용 한국어 주석.
-- 저장소에 requirements.txt를 이미 만들어 뒀어. plotly와 requests가 들어 있어.
-  더 필요한 게 있으면 이름만 알려 줘. 스트림릿·판다스·넘파이는 기본 설치라 빼고.
-- main.py 전체 코드를 한 번에 줘.
+@st.cache_data(show_spinner="지도 경계를 불러오는 중입니다...")
+def load_geojson():
+    return requests.get(GEO_URL, timeout=30).json()
+
+df = load_population()
+geojson = load_geojson()
+
+# 1. 가장 최신 연도만 사용
+latest_year = int(df["연도"].max())
+df = df[df["연도"] == latest_year].copy()
+
+# 2. '계_'로 시작하는 나이 열만 (남_·여_ 열까지 더하면 두 배가 됩니다)
+total_cols = [c for c in df.columns if c.startswith("계_")]
+
+def age_of(col):
+    m = re.match(r"계_(\d+)세", col)
+    return int(m.group(1)) if m else None
+
+# 3. 그중 65세 이상 열만 ('계_65세' ~ '계_100세 이상')
+elderly_cols = [c for c in total_cols if age_of(c) is not None and age_of(c) >= 65]
+
+# 4. 동 단위로 전체 인구·고령 인구 계산
+df["전체인구"] = df[total_cols].sum(axis=1)
+df["고령인구"] = df[elderly_cols].sum(axis=1)
+
+# 5. '코드' 앞 5자리 = 시군구 코드 → 시군구별로 묶어 비율 계산
+df["시군구코드"] = df["코드"].str[:5]
+grouped = df.groupby("시군구코드")[["전체인구", "고령인구"]].sum().reset_index()
+grouped["고령화율"] = (grouped["고령인구"] / grouped["전체인구"] * 100).round(2)
+
+# 경계 파일에서 코드 → 시군구·시도 이름 짝 만들기
+names = pd.DataFrame([
+    {
+        "시군구코드": str(f["properties"]["코드"]),
+        "시군구": f["properties"]["시군구"],
+        "시도": f["properties"]["시도"],
+    }
+    for f in geojson["features"]
+])
+merged = grouped.merge(names, on="시군구코드", how="left")
+
+# 6. 5단계 색 구간 (전국 시군구를 다섯 덩어리로 나눈 실제 경계값)
+BINS = [0, 19, 23, 28, 38, 100]
+LABELS = ["19% 미만", "19~23%", "23~28%", "28~38%", "38% 이상"]
+COLORS = {
+    "19% 미만": "#fee6ce",
+    "19~23%": "#fdc086",
+    "23~28%": "#f79646",
+    "28~38%": "#e8590c",
+    "38% 이상": "#a63603",
+}
+merged["단계"] = pd.cut(merged["고령화율"], bins=BINS, labels=LABELS, right=False)
+
+# 7. 단계구분도 그리기 (배경 지도 타일 없이 경계만)
+fig = px.choropleth(
+    merged,
+    geojson=geojson,
+    locations="시군구코드",
+    featureidkey="properties.코드",
+    color="단계",
+    category_orders={"단계": LABELS},
+    color_discrete_map=COLORS,
+    hover_name="시군구",
+    hover_data={"고령화율": True, "시도": True, "시군구코드": False, "단계": False},
+    labels={"고령화율": "65세 이상 비율(%)"},
+)
+fig.update_geos(fitbounds="locations", visible=False)
+fig.update_layout(
+    margin=dict(l=0, r=0, t=10, b=0),
+    height=700,
+    legend_title_text=f"65세 이상 비율 ({latest_year}년)",
+)
+
+st.plotly_chart(fig, width="stretch")
+
+# 8. 지도 아래 순위 표 두 개
+c1, c2 = st.columns(2)
+cols = ["시도", "시군구", "고령화율"]
+with c1:
+    st.subheader("🔴 고령화율 높은 곳 10")
+    st.dataframe(merged.nlargest(10, "고령화율")[cols].reset_index(drop=True))
+with c2:
+    st.subheader("🟢 고령화율 낮은 곳 10")
+    st.dataframe(merged.nsmallest(10, "고령화율")[cols].reset_index(drop=True))
