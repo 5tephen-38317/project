@@ -4,19 +4,61 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 
-# ============================================================
-# 기본 설정
-# ============================================================
+
+# =========================================================
+# 페이지 설정
+# =========================================================
 
 st.set_page_config(
-    page_title="전국 고령화 · 학원가 지도",
+    page_title="전국 고령화 데이터 분석",
+    page_icon="📊",
     layout="wide"
 )
 
-st.title("🗺️ 전국 고령화 · 학원가 지도")
-st.caption(
-    "시군구별 고령화율과 학원 분포를 비교하여 지역별 교육 인프라를 분석합니다."
-)
+
+# =========================================================
+# 디자인
+# =========================================================
+
+st.markdown("""
+<style>
+
+.main {
+    background-color: #ffffff;
+}
+
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 3rem;
+}
+
+h1 {
+    font-weight: 800;
+}
+
+h2 {
+    font-weight: 700;
+}
+
+.metric-card {
+    padding: 20px;
+    border-radius: 15px;
+    background: #f7f8fa;
+    text-align: center;
+}
+
+.small-text {
+    color: #666666;
+    font-size: 0.9rem;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+# =========================================================
+# 데이터 주소
+# =========================================================
 
 POP_URL = (
     "https://raw.githubusercontent.com/greatsong/modudata/main/"
@@ -29,24 +71,22 @@ GEO_URL = (
 )
 
 
-# ============================================================
-# 1. 주민등록 인구 데이터
-# ============================================================
+# =========================================================
+# 데이터 불러오기
+# =========================================================
 
 @st.cache_data(show_spinner="인구 데이터를 불러오는 중입니다...")
 def load_population():
 
-    return pd.read_csv(
+    df = pd.read_csv(
         POP_URL,
         dtype={"코드": str}
     )
 
+    return df
 
-# ============================================================
-# 2. 지도 경계 데이터
-# ============================================================
 
-@st.cache_data(show_spinner="지도 경계를 불러오는 중입니다...")
+@st.cache_data(show_spinner="대한민국 지도를 불러오는 중입니다...")
 def load_geojson():
 
     response = requests.get(
@@ -59,171 +99,265 @@ def load_geojson():
     return response.json()
 
 
-# ============================================================
-# 3. 학원 데이터
-#
-# academy.csv를 app.py와 같은 폴더에 넣어주세요.
-#
-# 주소가 들어 있는 열을 자동으로 찾습니다.
-# ============================================================
-
-@st.cache_data(show_spinner="학원 데이터를 불러오는 중입니다...")
-def load_academy():
-
-    try:
-
-        df = pd.read_csv(
-            "academy.csv",
-            encoding="utf-8-sig"
-        )
-
-    except UnicodeDecodeError:
-
-        df = pd.read_csv(
-            "academy.csv",
-            encoding="cp949"
-        )
-
-    return df
+population = load_population()
+geojson = load_geojson()
 
 
-# ============================================================
-# 데이터 불러오기
-# ============================================================
+# =========================================================
+# 연도 목록
+# =========================================================
 
-try:
-
-    population = load_population()
-
-except Exception as e:
-
-    st.error("인구 데이터를 불러오지 못했습니다.")
-    st.exception(e)
-    st.stop()
-
-
-try:
-
-    geojson = load_geojson()
-
-except Exception as e:
-
-    st.error("지도 경계 데이터를 불러오지 못했습니다.")
-    st.exception(e)
-    st.stop()
-
-
-# ============================================================
-# 4. 최신 연도 인구 데이터 계산
-# ============================================================
-
-latest_year = int(
-    population["연도"].max()
+years = sorted(
+    population["연도"]
+    .dropna()
+    .astype(int)
+    .unique()
 )
 
-df = population[
-    population["연도"] == latest_year
-].copy()
+
+latest_year = years[-1]
 
 
-# ============================================================
-# 5. 전체 인구 / 65세 이상 인구 계산
-# ============================================================
+# =========================================================
+# 고령화율 계산 함수
+# =========================================================
 
-total_cols = [
-    c for c in df.columns
-    if c.startswith("계_")
-]
+def calculate_population(year):
+
+    df = population[
+        population["연도"].astype(int) == year
+    ].copy()
 
 
-def age_of(col):
-
-    m = re.match(
-        r"계_(\d+)세",
+    # 전체 연령별 인구 컬럼
+    total_columns = [
         col
+        for col in df.columns
+        if col.startswith("계_")
+    ]
+
+
+    # 65세 이상 연령 찾기
+    elderly_columns = []
+
+    for col in total_columns:
+
+        match = re.match(
+            r"계_(\d+)세",
+            col
+        )
+
+        if match:
+
+            age = int(
+                match.group(1)
+            )
+
+            if age >= 65:
+
+                elderly_columns.append(
+                    col
+                )
+
+
+    # 전체 인구
+    df["전체인구"] = df[
+        total_columns
+    ].sum(axis=1)
+
+
+    # 65세 이상 인구
+    df["고령인구"] = df[
+        elderly_columns
+    ].sum(axis=1)
+
+
+    # 행정구역 코드
+    df["시군구코드"] = (
+        df["코드"]
+        .astype(str)
+        .str[:5]
     )
 
-    return int(m.group(1)) if m else None
+
+    # 시군구 단위 합산
+    result = (
+
+        df
+
+        .groupby("시군구코드")
+
+        [
+            [
+                "전체인구",
+                "고령인구"
+            ]
+        ]
+
+        .sum()
+
+        .reset_index()
+    )
 
 
-elderly_cols = [
-    c for c in total_cols
-    if age_of(c) is not None
-    and age_of(c) >= 65
-]
+    # 고령화율
+    result["고령화율"] = (
+
+        result["고령인구"]
+        /
+        result["전체인구"]
+        *
+        100
+
+    ).round(2)
 
 
-df["전체인구"] = df[
-    total_cols
-].sum(axis=1)
+    return result
 
 
-df["고령인구"] = df[
-    elderly_cols
-].sum(axis=1)
+# =========================================================
+# 지도 이름 데이터
+# =========================================================
+
+name_data = []
+
+for feature in geojson["features"]:
+
+    properties = feature["properties"]
+
+    name_data.append({
+
+        "시군구코드":
+            str(properties["코드"]),
+
+        "시군구":
+            properties["시군구"],
+
+        "시도":
+            properties["시도"]
+
+    })
 
 
-# ============================================================
-# 6. 읍면동 → 시군구 코드
-# ============================================================
-
-df["시군구코드"] = (
-    df["코드"]
-    .astype(str)
-    .str[:5]
+names = pd.DataFrame(
+    name_data
 )
 
 
-grouped = (
-    df
-    .groupby("시군구코드")[
-        ["전체인구", "고령인구"]
-    ]
-    .sum()
-    .reset_index()
+# =========================================================
+# 현재 연도 데이터
+# =========================================================
+
+current = calculate_population(
+    latest_year
 )
 
 
-grouped["고령화율"] = (
-    grouped["고령인구"]
-    / grouped["전체인구"]
-    * 100
-).round(2)
-
-
-# ============================================================
-# 7. 지도에서 시군구 이름 가져오기
-# ============================================================
-
-names = pd.DataFrame([
-
-    {
-        "시군구코드": str(
-            f["properties"]["코드"]
-        ),
-
-        "시군구": f["properties"]["시군구"],
-
-        "시도": f["properties"]["시도"]
-    }
-
-    for f in geojson["features"]
-
-])
-
-
-merged = grouped.merge(
+current = current.merge(
     names,
     on="시군구코드",
     how="left"
 )
 
 
-# ============================================================
-# 8. 고령화 단계
-# ============================================================
+# =========================================================
+# 제목
+# =========================================================
 
-BINS = [
+st.title(
+    "🇰🇷 대한민국 고령화 데이터 분석"
+)
+
+st.markdown(
+    "전국 시군구의 **65세 이상 인구 비율**을 데이터로 비교하고 "
+    "지역별 고령화 현상을 탐색합니다."
+)
+
+
+# =========================================================
+# 핵심 지표
+# =========================================================
+
+national_population = (
+    current["전체인구"].sum()
+)
+
+national_elderly = (
+    current["고령인구"].sum()
+)
+
+national_rate = (
+    national_elderly
+    /
+    national_population
+    *
+    100
+)
+
+
+highest = current.loc[
+    current["고령화율"].idxmax()
+]
+
+lowest = current.loc[
+    current["고령화율"].idxmin()
+]
+
+
+c1, c2, c3, c4 = st.columns(4)
+
+
+with c1:
+
+    st.metric(
+        "분석 기준 연도",
+        f"{latest_year}년"
+    )
+
+
+with c2:
+
+    st.metric(
+        "전국 고령화율",
+        f"{national_rate:.2f}%"
+    )
+
+
+with c3:
+
+    st.metric(
+        "가장 높은 지역",
+        highest["시군구"],
+        f"{highest['고령화율']:.2f}%"
+    )
+
+
+with c4:
+
+    st.metric(
+        "가장 낮은 지역",
+        lowest["시군구"],
+        f"{lowest['고령화율']:.2f}%"
+    )
+
+
+# =========================================================
+# 지도
+# =========================================================
+
+st.divider()
+
+st.header(
+    "🗺️ 전국 시군구별 고령화율"
+)
+
+st.caption(
+    "65세 이상 인구가 전체 인구에서 차지하는 비율"
+)
+
+
+# 단계 구분
+bins = [
     0,
     19,
     23,
@@ -232,7 +366,7 @@ BINS = [
     100
 ]
 
-LABELS = [
+labels = [
     "19% 미만",
     "19~23%",
     "23~28%",
@@ -240,37 +374,18 @@ LABELS = [
     "38% 이상"
 ]
 
-COLORS = {
 
-    "19% 미만": "#fee6ce",
-
-    "19~23%": "#fdc086",
-
-    "23~28%": "#f79646",
-
-    "28~38%": "#e8590c",
-
-    "38% 이상": "#a63603"
-}
-
-
-merged["단계"] = pd.cut(
-    merged["고령화율"],
-    bins=BINS,
-    labels=LABELS,
+current["고령화단계"] = pd.cut(
+    current["고령화율"],
+    bins=bins,
+    labels=labels,
     right=False
 )
 
 
-# ============================================================
-# 9. 고령화 지도
-# ============================================================
+fig_map = px.choropleth(
 
-st.header("👵 전국 고령화 지도")
-
-fig_old = px.choropleth(
-
-    merged,
+    current,
 
     geojson=geojson,
 
@@ -278,822 +393,435 @@ fig_old = px.choropleth(
 
     featureidkey="properties.코드",
 
-    color="단계",
+    color="고령화단계",
 
     category_orders={
-        "단계": LABELS
+        "고령화단계": labels
     },
 
-    color_discrete_map=COLORS,
+    color_discrete_sequence=[
+        "#E8F3F8",
+        "#B9DCEB",
+        "#78B9D0",
+        "#E6A86B",
+        "#C95A4A"
+    ],
 
     hover_name="시군구",
 
     hover_data={
 
-        "고령화율": True,
-
         "시도": True,
 
-        "전체인구": True,
+        "고령화율": True,
 
-        "고령인구": True,
+        "전체인구": ":,",
+
+        "고령인구": ":,",
 
         "시군구코드": False,
 
-        "단계": False
+        "고령화단계": False
     },
 
     labels={
-        "고령화율": "65세 이상 비율(%)",
-        "전체인구": "전체 인구",
-        "고령인구": "65세 이상 인구"
+
+        "시도": "시도",
+
+        "고령화율":
+            "고령화율 (%)",
+
+        "전체인구":
+            "전체 인구",
+
+        "고령인구":
+            "65세 이상 인구"
     }
 )
 
 
-fig_old.update_geos(
+fig_map.update_geos(
     fitbounds="locations",
     visible=False
 )
 
 
-fig_old.update_layout(
+fig_map.update_layout(
+    height=720,
 
     margin=dict(
         l=0,
         r=0,
-        t=10,
+        t=20,
         b=0
     ),
 
-    height=700,
-
-    legend_title_text=(
-        f"65세 이상 비율 ({latest_year}년)"
-    )
+    legend_title_text="고령화율"
 )
 
 
 st.plotly_chart(
-    fig_old,
-    use_container_width=True
+    fig_map,
+    width="stretch"
 )
 
 
-# ============================================================
-# 10. 고령화 TOP / LOW
-# ============================================================
+# =========================================================
+# TOP / LOW
+# =========================================================
 
-c1, c2 = st.columns(2)
+st.divider()
+
+st.header(
+    "📊 지역별 고령화율 비교"
+)
 
 
-cols_old = [
+left, right = st.columns(2)
+
+
+table_columns = [
     "시도",
     "시군구",
     "고령화율"
 ]
 
 
-with c1:
+with left:
 
     st.subheader(
-        "🔴 고령화율 높은 지역 TOP 10"
+        "🔴 고령화율이 높은 지역"
     )
 
-    st.dataframe(
+    top10 = (
 
-        merged
+        current
+
         .nlargest(
             10,
             "고령화율"
-        )[cols_old]
-        .reset_index(drop=True),
+        )
 
-        use_container_width=True
+        [table_columns]
+
+        .reset_index(drop=True)
     )
 
-
-with c2:
-
-    st.subheader(
-        "🟢 고령화율 낮은 지역 TOP 10"
+    top10.index = (
+        top10.index + 1
     )
 
     st.dataframe(
+        top10,
+        width="stretch"
+    )
 
-        merged
+
+with right:
+
+    st.subheader(
+        "🔵 고령화율이 낮은 지역"
+    )
+
+    low10 = (
+
+        current
+
         .nsmallest(
             10,
             "고령화율"
-        )[cols_old]
-        .reset_index(drop=True),
+        )
 
-        use_container_width=True
+        [table_columns]
+
+        .reset_index(drop=True)
     )
 
-
-# ============================================================
-# 11. 학원 데이터
-# ============================================================
-
-st.divider()
-
-st.header("🏫 전국 학원가 분석")
-
-
-try:
-
-    academy = load_academy()
-
-except FileNotFoundError:
-
-    st.warning(
-        """
-        `academy.csv` 파일을 찾을 수 없습니다.
-
-        공공데이터포털의 학원·교습소 데이터를 다운로드한 뒤
-        파일명을 `academy.csv`로 변경하여
-        `app.py`와 같은 폴더에 넣어주세요.
-        """
-    )
-
-    st.stop()
-
-except Exception as e:
-
-    st.error(
-        "학원 데이터를 읽는 과정에서 오류가 발생했습니다."
-    )
-
-    st.exception(e)
-
-    st.stop()
-
-
-# ============================================================
-# 12. 학원 데이터의 주소 열 자동 탐색
-# ============================================================
-
-possible_address_columns = [
-
-    "주소",
-
-    "도로명주소",
-
-    "소재지주소",
-
-    "학원주소",
-
-    "소재지도로명주소",
-
-    "도로명전체주소",
-
-    "주소(도로명)"
-
-]
-
-
-address_column = None
-
-
-for col in possible_address_columns:
-
-    if col in academy.columns:
-
-        address_column = col
-
-        break
-
-
-if address_column is None:
-
-    st.error(
-        """
-        학원 데이터에서 주소 열을 찾지 못했습니다.
-
-        현재 CSV의 열 이름:
-        """
-    )
-
-    st.write(
-        list(academy.columns)
-    )
-
-    st.stop()
-
-
-# ============================================================
-# 13. 주소에서 시도 / 시군구 추출
-# ============================================================
-
-academy[address_column] = (
-    academy[address_column]
-    .fillna("")
-    .astype(str)
-)
-
-
-def extract_region(address):
-
-    address = address.strip()
-
-    if not address:
-
-        return None, None
-
-    parts = address.split()
-
-    if len(parts) < 2:
-
-        return None, None
-
-    sido = parts[0]
-
-    sigungu = parts[1]
-
-    # 특별시 / 광역시 / 특별자치시 / 도
-    # 이름 처리
-
-    sido_clean = sido
-
-    # 세종특별자치시처럼
-    # 시군구가 따로 없는 경우
-
-    if (
-        sido_clean == "세종특별자치시"
-    ):
-
-        return sido_clean, "세종특별자치시"
-
-
-    return sido_clean, sigungu
-
-
-academy[
-    ["학원시도", "학원시군구"]
-] = academy[
-    address_column
-].apply(
-    lambda x: pd.Series(
-        extract_region(x)
-    )
-)
-
-
-# ============================================================
-# 14. 시군구 이름 정리
-# ============================================================
-
-def normalize_sigungu(x):
-
-    if pd.isna(x):
-
-        return x
-
-    x = str(x).strip()
-
-    return x
-
-
-academy["학원시군구"] = (
-    academy["학원시군구"]
-    .apply(normalize_sigungu)
-)
-
-
-merged["시군구"] = (
-    merged["시군구"]
-    .astype(str)
-    .str.strip()
-)
-
-
-# ============================================================
-# 15. 시도 + 시군구 기준으로 학원 수 계산
-# ============================================================
-
-academy_grouped = (
-
-    academy
-    .dropna(
-        subset=[
-            "학원시도",
-            "학원시군구"
-        ]
-    )
-
-    .groupby(
-        [
-            "학원시도",
-            "학원시군구"
-        ]
-    )
-
-    .size()
-
-    .reset_index(
-        name="학원수"
-    )
-)
-
-
-# ============================================================
-# 16. 지도 데이터와 연결
-# ============================================================
-
-merged["검색시도"] = (
-    merged["시도"]
-    .astype(str)
-    .str.strip()
-)
-
-
-merged["검색시군구"] = (
-    merged["시군구"]
-    .astype(str)
-    .str.strip()
-)
-
-
-academy_grouped["학원시도"] = (
-    academy_grouped["학원시도"]
-    .astype(str)
-    .str.strip()
-)
-
-
-academy_grouped["학원시군구"] = (
-    academy_grouped["학원시군구"]
-    .astype(str)
-    .str.strip()
-)
-
-
-academy_merged = merged.merge(
-
-    academy_grouped,
-
-    left_on=[
-        "검색시도",
-        "검색시군구"
-    ],
-
-    right_on=[
-        "학원시도",
-        "학원시군구"
-    ],
-
-    how="left"
-)
-
-
-academy_merged["학원수"] = (
-    academy_merged["학원수"]
-    .fillna(0)
-    .astype(int)
-)
-
-
-# ============================================================
-# 17. 학원 밀도 계산
-#
-# 학원 밀도 =
-# 학원 수 / 전체 인구 × 1000
-# ============================================================
-
-academy_merged["학원밀도"] = (
-
-    academy_merged["학원수"]
-
-    / academy_merged["전체인구"]
-
-    * 1000
-
-).round(2)
-
-
-# ============================================================
-# 18. 학원 지도용 분위수 구간
-# ============================================================
-
-try:
-
-    academy_merged[
-        "학원수구간"
-    ] = pd.qcut(
-
-        academy_merged["학원수"],
-
-        q=5,
-
-        labels=[
-            "매우 적음",
-            "적음",
-            "보통",
-            "많음",
-            "매우 많음"
-        ],
-
-        duplicates="drop"
-
-    )
-
-except Exception:
-
-    academy_merged[
-        "학원수구간"
-    ] = "자료 부족"
-
-
-# ============================================================
-# 19. 학원 밀도 구간
-# ============================================================
-
-try:
-
-    academy_merged[
-        "학원밀도구간"
-    ] = pd.qcut(
-
-        academy_merged["학원밀도"],
-
-        q=5,
-
-        labels=[
-            "매우 낮음",
-            "낮음",
-            "보통",
-            "높음",
-            "매우 높음"
-        ],
-
-        duplicates="drop"
-
-    )
-
-except Exception:
-
-    academy_merged[
-        "학원밀도구간"
-    ] = "자료 부족"
-
-
-# ============================================================
-# 20. 학원 지도 탭
-# ============================================================
-
-tab1, tab2 = st.tabs(
-    [
-        "🏫 학원 수",
-        "📊 인구 대비 학원 밀도"
-    ]
-)
-
-
-# ============================================================
-# 21. 학원 수 지도
-# ============================================================
-
-with tab1:
-
-    st.subheader(
-        "시군구별 학원 수"
-    )
-
-    fig_academy = px.choropleth(
-
-        academy_merged,
-
-        geojson=geojson,
-
-        locations="시군구코드",
-
-        featureidkey="properties.코드",
-
-        color="학원수",
-
-        color_continuous_scale="Oranges",
-
-        hover_name="시군구",
-
-        hover_data={
-
-            "시도": True,
-
-            "학원수": True,
-
-            "전체인구": True,
-
-            "학원밀도": True,
-
-            "시군구코드": False
-        },
-
-        labels={
-
-            "학원수": "학원 수",
-
-            "전체인구": "전체 인구",
-
-            "학원밀도":
-                "인구 1,000명당 학원 수"
-        }
-    )
-
-
-    fig_academy.update_geos(
-
-        fitbounds="locations",
-
-        visible=False
-    )
-
-
-    fig_academy.update_layout(
-
-        margin=dict(
-            l=0,
-            r=0,
-            t=10,
-            b=0
-        ),
-
-        height=700
-    )
-
-
-    st.plotly_chart(
-
-        fig_academy,
-
-        use_container_width=True
-    )
-
-
-# ============================================================
-# 22. 학원 밀도 지도
-# ============================================================
-
-with tab2:
-
-    st.subheader(
-        "인구 1,000명당 학원 수"
-    )
-
-    st.caption(
-        "학원 수 ÷ 전체 인구 × 1,000"
-    )
-
-
-    fig_density = px.choropleth(
-
-        academy_merged,
-
-        geojson=geojson,
-
-        locations="시군구코드",
-
-        featureidkey="properties.코드",
-
-        color="학원밀도",
-
-        color_continuous_scale="Oranges",
-
-        hover_name="시군구",
-
-        hover_data={
-
-            "시도": True,
-
-            "학원수": True,
-
-            "전체인구": True,
-
-            "학원밀도": True,
-
-            "시군구코드": False
-        },
-
-        labels={
-
-            "학원수": "학원 수",
-
-            "전체인구": "전체 인구",
-
-            "학원밀도":
-                "인구 1,000명당 학원 수"
-        }
-    )
-
-
-    fig_density.update_geos(
-
-        fitbounds="locations",
-
-        visible=False
-    )
-
-
-    fig_density.update_layout(
-
-        margin=dict(
-            l=0,
-            r=0,
-            t=10,
-            b=0
-        ),
-
-        height=700
-    )
-
-
-    st.plotly_chart(
-
-        fig_density,
-
-        use_container_width=True
-    )
-
-
-# ============================================================
-# 23. 학원가 TOP 10
-# ============================================================
-
-st.subheader(
-    "📊 지역별 학원가 TOP 10"
-)
-
-
-c3, c4 = st.columns(2)
-
-
-academy_cols = [
-
-    "시도",
-
-    "시군구",
-
-    "학원수",
-
-    "학원밀도"
-
-]
-
-
-with c3:
-
-    st.markdown(
-        "### 🏫 학원 수가 많은 지역 TOP 10"
+    low10.index = (
+        low10.index + 1
     )
 
     st.dataframe(
-
-        academy_merged
-
-        .nlargest(
-            10,
-            "학원수"
-        )[academy_cols]
-
-        .reset_index(
-            drop=True
-        ),
-
-        use_container_width=True
+        low10,
+        width="stretch"
     )
 
 
-with c4:
-
-    st.markdown(
-        "### 📈 인구 대비 학원 밀도가 높은 지역 TOP 10"
-    )
-
-    st.dataframe(
-
-        academy_merged
-
-        .nlargest(
-            10,
-            "학원밀도"
-        )[academy_cols]
-
-        .reset_index(
-            drop=True
-        ),
-
-        use_container_width=True
-    )
-
-
-# ============================================================
-# 24. 고령화율 × 학원밀도 산점도
-# ============================================================
+# =========================================================
+# 고령화율 분포
+# =========================================================
 
 st.divider()
 
 st.header(
-    "👵 고령화율 × 🏫 학원밀도"
+    "📈 전국 고령화율 분포"
 )
 
-st.write(
-    "지역의 고령화 정도와 인구 대비 학원 밀도의 관계를 비교합니다."
+st.caption(
+    "각 시군구의 고령화율이 어느 구간에 집중되어 있는지 확인합니다."
 )
 
 
-scatter = px.scatter(
+fig_hist = px.histogram(
 
-    academy_merged,
+    current,
 
     x="고령화율",
 
-    y="학원밀도",
-
-    size="학원수",
-
-    hover_name="시군구",
-
-    hover_data={
-
-        "시도": True,
-
-        "고령화율": True,
-
-        "학원수": True,
-
-        "학원밀도": True,
-
-        "전체인구": True
-    },
+    nbins=25,
 
     labels={
-
         "고령화율":
-            "65세 이상 인구 비율(%)",
-
-        "학원밀도":
-            "인구 1,000명당 학원 수",
-
-        "학원수":
-            "학원 수",
-
-        "전체인구":
-            "전체 인구"
+            "고령화율 (%)",
+        "count":
+            "시군구 수"
     },
 
-    title=(
-        "시군구별 고령화율과 학원 밀도"
+    title="시군구별 고령화율 분포"
+
+)
+
+
+fig_hist.add_vline(
+    x=national_rate,
+    line_dash="dash",
+    annotation_text=(
+        f"전국 평균 {national_rate:.2f}%"
     )
 )
 
 
-scatter.update_layout(
-
-    height=650,
-
-    margin=dict(
-        l=20,
-        r=20,
-        t=60,
-        b=20
-    )
+fig_hist.update_layout(
+    height=500
 )
 
 
 st.plotly_chart(
-
-    scatter,
-
-    use_container_width=True
+    fig_hist,
+    width="stretch"
 )
 
 
-# ============================================================
-# 25. 해석 주의사항
-# ============================================================
+# =========================================================
+# 지역 상세 분석
+# =========================================================
 
-st.info(
-    """
-📌 해석 시 주의
+st.divider()
 
-고령화율과 학원 밀도 사이에 통계적 관계가 나타나더라도
-그 자체만으로 고령화가 학원 수를 감소시키거나 증가시킨다는
-인과관계를 의미하지 않습니다.
-
-지역의 인구 규모, 학생 인구, 소득 수준, 도시 규모,
-교육 수요 등 다양한 요인이 함께 영향을 줄 수 있습니다.
-"""
+st.header(
+    "🔎 지역 상세 분석"
 )
 
 
-# ============================================================
-# 26. 데이터 기준
-# ============================================================
+region_names = sorted(
+
+    (
+        current["시도"]
+        + " "
+        + current["시군구"]
+    )
+
+    .dropna()
+
+    .unique()
+)
+
+
+selected_region = st.selectbox(
+    "지역",
+    region_names
+)
+
+
+region = current[
+    (
+        current["시도"]
+        + " "
+        + current["시군구"]
+    )
+    == selected_region
+].iloc[0]
+
+
+r1, r2, r3 = st.columns(3)
+
+
+with r1:
+
+    st.metric(
+        "전체 인구",
+        f"{int(region['전체인구']):,}명"
+    )
+
+
+with r2:
+
+    st.metric(
+        "65세 이상 인구",
+        f"{int(region['고령인구']):,}명"
+    )
+
+
+with r3:
+
+    difference = (
+        region["고령화율"]
+        - national_rate
+    )
+
+    st.metric(
+        "고령화율",
+        f"{region['고령화율']:.2f}%",
+        f"{difference:+.2f}%p (전국 대비)"
+    )
+
+
+# =========================================================
+# 연도별 변화
+# =========================================================
+
+st.divider()
+
+st.header(
+    "📅 연도에 따른 고령화율 변화"
+)
 
 st.caption(
-    f"주민등록 인구 기준 연도: {latest_year}년"
+    "같은 지역의 고령화율이 시간에 따라 어떻게 변했는지 확인합니다."
+)
+
+
+trend_code = region[
+    "시군구코드"
+]
+
+
+trend_data = []
+
+
+for year in years:
+
+    year_df = calculate_population(
+        year
+    )
+
+    target = year_df[
+        year_df["시군구코드"]
+        == trend_code
+    ]
+
+    if not target.empty:
+
+        trend_data.append({
+
+            "연도":
+                year,
+
+            "고령화율":
+                target.iloc[0][
+                    "고령화율"
+                ]
+
+        })
+
+
+trend_df = pd.DataFrame(
+    trend_data
+)
+
+
+fig_trend = px.line(
+
+    trend_df,
+
+    x="연도",
+
+    y="고령화율",
+
+    markers=True,
+
+    labels={
+
+        "연도":
+            "연도",
+
+        "고령화율":
+            "고령화율 (%)"
+    },
+
+    title=(
+        f"{selected_region}의 고령화율 변화"
+    )
+)
+
+
+fig_trend.update_layout(
+    height=500
+)
+
+
+st.plotly_chart(
+    fig_trend,
+    width="stretch"
+)
+
+
+# =========================================================
+# 탐구 포인트
+# =========================================================
+
+st.divider()
+
+st.header(
+    "💡 데이터에서 생각해 볼 질문"
+)
+
+q1, q2 = st.columns(2)
+
+
+with q1:
+
+    st.markdown("""
+### ① 지역 차이
+
+왜 같은 시점에 존재하는 지역들 사이에서도
+고령화율에 큰 차이가 나타날까?
+
+- 인구 이동
+- 산업 구조
+- 도시 규모
+- 주거 환경
+- 출생률 등의 요인을 추가로 탐색할 수 있다.
+""")
+
+
+with q2:
+
+    st.markdown("""
+### ② 시간적 변화
+
+한 지역의 고령화율은 시간이 지나면서
+어떤 방향으로 변화하는가?
+
+특정 지역의 변화 속도가 전국 평균과
+어떻게 다른지도 비교할 수 있다.
+""")
+
+
+# =========================================================
+# 데이터 출처
+# =========================================================
+
+st.divider()
+
+st.caption(
+    "인구 데이터: 행정구역별 연도별 주민등록 인구 데이터"
 )
 
 st.caption(
-    "학원 데이터는 academy.csv에 포함된 자료 기준입니다."
+    "지도 경계: 시군구 GeoJSON 데이터"
+)
+
+st.caption(
+    "※ 고령화율 = 65세 이상 인구 ÷ 전체 인구 × 100"
 )
